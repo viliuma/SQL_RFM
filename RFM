@@ -1,0 +1,181 @@
+DECLARE reference_date DATE DEFAULT '2011-12-01';
+
+WITH CleanedData AS
+(
+  SELECT
+    CustomerID, 
+    CAST(InvoiceDate AS DATE) AS InvoiceDate,
+    InvoiceNo,
+    Quantity,
+    UnitPrice
+  FROM 
+    `turing_data_analytics.rfm`
+  WHERE 
+    CustomerID IS NOT NULL AND UnitPrice > 0 AND Quantity > 0 AND InvoiceDate BETWEEN '2010-12-01' AND '2011-12-01'
+),
+--Compute for F & M
+FrequencyMonetary AS 
+(
+  SELECT 
+    CustomerID,
+    MAX(InvoiceDate) AS last_purchase_date,
+    COUNT(DISTINCT InvoiceNo)  AS frequency,
+    SUM(UnitPrice * Quantity) AS monetary
+  FROM 
+    CleanedData
+  GROUP BY 
+    CustomerID
+),
+--Compute for R
+RecencyCalculation AS
+(
+  SELECT 
+    *,
+    DATE_DIFF(reference_date, last_purchase_date, DAY) AS recency
+  FROM 
+  (
+    SELECT  *,
+      reference_date
+    FROM 
+      FrequencyMonetary 
+  )
+),
+
+Quartiles AS 
+(
+  SELECT 
+    a.*,
+    --All percentiles for MONETARY
+    monetary_percentiles.percentiles[offset(25)] AS m25, 
+    monetary_percentiles.percentiles[offset(50)] AS m50,
+    monetary_percentiles.percentiles[offset(75)] AS m75, 
+    monetary_percentiles.percentiles[offset(100)] AS m100,
+    --All percentiles for FREQUENCY
+    frequency_percentiles.percentiles[offset(25)] AS f25, 
+    frequency_percentiles.percentiles[offset(50)] AS f50,
+    frequency_percentiles.percentiles[offset(75)] AS f75, 
+    frequency_percentiles.percentiles[offset(100)] AS f100,    
+    --All percentiles for RECENCY
+    recency_percentiles.percentiles[offset(25)] AS r25, 
+    recency_percentiles.percentiles[offset(50)] AS r50,
+    recency_percentiles.percentiles[offset(75)] AS r75, 
+    recency_percentiles.percentiles[offset(100)] AS r100
+  FROM 
+    RecencyCalculation a,
+    (
+      SELECT 
+        APPROX_QUANTILES(monetary, 100) AS percentiles 
+      FROM
+        RecencyCalculation
+    ) AS monetary_percentiles,
+
+    (
+      SELECT 
+        APPROX_QUANTILES(frequency, 100) AS percentiles 
+      FROM
+        RecencyCalculation
+    ) AS frequency_percentiles,
+
+    (
+      SELECT 
+        APPROX_QUANTILES(recency, 100) AS percentiles 
+      FROM
+        RecencyCalculation
+    ) AS recency_percentiles
+),
+RFMScore AS 
+(
+  SELECT 
+    *, 
+    CAST(ROUND((f_score + m_score) / 2, 0) AS INT64) AS fm_score
+  FROM 
+  (
+    SELECT 
+      *, 
+      CASE WHEN monetary <= m25 THEN 1
+           WHEN monetary <= m50 AND monetary > m25 THEN 2 
+           WHEN monetary <= m75 AND monetary > m50 THEN 3 
+           WHEN monetary <= m100 AND monetary > m75 THEN 4 
+      END AS m_score,
+
+      CASE WHEN frequency <= f25 THEN 1
+           WHEN frequency <= f50 AND frequency > f25 THEN 2 
+           WHEN frequency <= f75 AND frequency > f50 THEN 3 
+           WHEN frequency <= f100 AND frequency > f75 THEN 4 
+      END AS f_score,
+
+        --Recency scoring is reversed
+      CASE WHEN recency <= r25 THEN 4
+           WHEN recency <= r50 AND recency > r25 THEN 3 
+           WHEN recency <= r75 AND recency > r50 THEN 2 
+           WHEN recency <= r100 AND recency > r75 THEN 1
+      END AS r_score,
+    FROM Quartiles
+  )
+),
+
+SegmentsByScore AS 
+(
+  SELECT 
+    DISTINCT CustomerID, 
+    recency,
+    frequency, 
+    monetary,
+    r_score,
+    f_score,
+    m_score,
+    fm_score,
+    CASE 
+    WHEN (r_score = 4 AND fm_score = 4) 
+    OR (r_score = 4 AND fm_score = 3) 
+    OR (r_score = 3 AND fm_score = 4) 
+    THEN 'Champions'
+    
+    WHEN (r_score = 4 AND fm_score = 2) ---
+    OR (r_score = 3 AND fm_score = 3)
+    OR (r_score = 2 AND fm_score = 4)
+    OR (r_score = 2 AND fm_score = 3)
+    THEN 'Loyal Customers'
+
+    WHEN  (r_score = 2 AND fm_score = 2)
+    OR (r_score = 3 AND fm_score = 2)
+    THEN 'Potential Loyalists'
+    
+    WHEN r_score = 4 AND fm_score = 1 
+    THEN 'Recent Customers'
+    
+    WHEN (r_score = 3 AND fm_score = 1) 
+    OR (r_score = 2 AND fm_score = 1)
+    THEN 'Promising'
+    
+    WHEN (r_score = 2 AND fm_score = 3) 
+    OR (r_score = 2 AND fm_score = 3)
+    OR (r_score = 1 AND fm_score = 2)
+    THEN 'At Risk'
+    
+    WHEN (r_score = 1 AND fm_score = 4)
+    OR (r_score = 1 AND fm_score = 3)        
+    THEN 'Cant Lose Them'
+    
+    WHEN r_score = 1 AND fm_score = 1 
+    THEN 'Lost'
+    END AS rfm_segment 
+
+  FROM RFMScore
+)
+
+  SELECT 
+    CustomerID, 
+    recency, 
+    frequency, 
+    ROUND(monetary,2) AS monetary, 
+    r_score, 
+    f_score, 
+    fm_score,
+    CAST(CONCAT (r_score,f_score,fm_score) AS INT64) AS rfm_score, 
+    rfm_segment
+  FROM 
+    SegmentsByScore
+
+    
+--WHERE rfm_segment LIKE 'Lost'
