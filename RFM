@@ -9,7 +9,7 @@ WITH CleanedData AS
     Quantity,
     UnitPrice
   FROM 
-    `turing_data_analytics.rfm`
+    `data_table`
   WHERE 
     CustomerID IS NOT NULL AND UnitPrice > 0 AND Quantity > 0 AND InvoiceDate BETWEEN '2010-12-01' AND '2011-12-01'
 ),
